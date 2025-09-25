@@ -1,0 +1,92 @@
+setwd("C:/Users/Philip/Documents/Academic/University/2) Swansea/Project/4) data/0.5) combined datasheets")
+# Load libraries (install packages if not previously installed) 
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(forcats)
+library(randomcoloR)
+
+# Load the data
+raw <- read.csv("combined_reshape_finished.csv")
+raw <- raw %>% filter(Condition == "Control")
+
+# Clean coculture column 
+raw$coculture <- iconv(raw$coculture, from = "", to = "ASCII", sub = "")
+raw$coculture <- gsub("–|—", "-", raw$coculture)
+
+# some of the data contains symbols which need to be filtered out
+raw <- raw %>%
+  filter(!is.na(coculture)) %>%
+  filter(grepl("^S\\d+-S\\d+$", coculture)) %>%
+  filter(Time %% 6 == 0)
+
+# Define the starter strain - to identify monocultures
+raw <- raw %>%
+  mutate(starter = str_extract(coculture, "^S\\d+")) %>%
+  mutate(is_mono = coculture == paste0(starter, "-", starter))
+
+# Summarise mean and SE
+summary_data <- raw %>%
+  group_by(starter, coculture, Time, is_mono) %>%
+  summarise(
+    mean_area = mean(area, na.rm = TRUE),
+    se_area = sd(area, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Gets the order right  S11 and S12 were between S1 & S3 otherwise
+starter_order <- c(paste0("S", 1:10), "S11", "S12")
+summary_data$starter <- factor(summary_data$starter, levels = starter_order)
+
+# Get all cocultures
+all_cocultures <- unique(summary_data$coculture)
+mono_cultures <- summary_data %>% filter(is_mono) %>% pull(coculture) %>% unique()
+co_cultures <- setdiff(all_cocultures, mono_cultures)
+
+# Generate  colors for co-cultures
+set.seed(420)  
+co_colors <- distinctColorPalette(length(co_cultures))
+
+# Assign colors
+color_vector <- setNames(rep("black", length(all_cocultures)), all_cocultures)
+color_vector[co_cultures] <- co_colors
+
+#Reorder coculture factor and color 
+coculture_order_df <- data.frame(coculture = all_cocultures) %>%
+  mutate(
+    starter = as.integer(str_extract(coculture, "(?<=^S)\\d+")),
+    partner = as.integer(str_extract(coculture, "(?<=-S)\\d+$"))
+  ) %>%
+  arrange(starter, partner)
+
+# Apply new factor levels
+summary_data$coculture <- factor(summary_data$coculture, levels = coculture_order_df$coculture)
+
+color_vector <- color_vector[coculture_order_df$coculture]
+
+
+# Plot
+ggplot(summary_data, aes(x = Time, y = mean_area, group = coculture, color = coculture)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_area - se_area, ymax = se_area + mean_area), width = 0.5) +
+  facet_wrap(~ starter, scales = "free_y") +
+  scale_color_manual(values = color_vector) +
+  labs(
+    title = "Coculture growth in Control media",
+    x = "Time",
+    y = "Colony area (mm²)",
+    color = "Co-culture"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold"),
+    legend.key.height = unit(0.5, "cm"),
+    legend.key.width = unit(1.2, "cm"),
+    legend.box = "horizontal"  # aligns legend entries in rows
+  ) +
+  guides(color = guide_legend(ncol = 9, byrow = TRUE))  # change nrow as needed- this needed to be done for it to fit on a page
+
+#species names were added in later on powerpoint
