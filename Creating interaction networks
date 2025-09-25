@@ -1,0 +1,130 @@
+# Required libraries- install the packages if you dont have them
+library(dplyr)
+library(stringr)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(ggplot2)
+library(tibble)
+library(cowplot)
+
+
+raw <- read.csv("combined_reshape_finished.csv", encoding = "latin1") %>%
+  mutate(coculture = as.character(coculture),
+    coculture = iconv(coculture, from = "latin1", to = "ASCII", sub = "-"),
+    coculture = gsub("[\u0096–—−‐‑‒‾−]", "-", coculture),
+    coculture = gsub("\\s+", "", coculture)
+  ) %>%
+  filter(grepl("^S\\d+-S\\d+$", coculture))
+
+
+#AUC calculation
+
+calculate_auc <- function(df) {
+  df <- df[order(df$Time), ]
+  sum(diff(df$Time) * (head(df$area, -1) + tail(df$area, -1)) / 2, na.rm = TRUE)
+}
+
+auc_data <- raw %>%
+  group_by(Condition, coculture, Object_ID) %>%
+  summarise(AUC = calculate_auc(cur_data()), .groups = "drop")
+
+auc_summary <- auc_data %>%
+  group_by(Condition, coculture) %>%
+  summarise(mean_auc = mean(AUC, na.rm = TRUE), .groups = "drop") %>%
+  mutate(starter = str_extract(coculture, "^S\\d+"),
+    partner = sub("^S\\d+-(S\\d+)$", "\\1", coculture)
+  )
+
+mono_auc <- auc_summary %>%
+  filter(starter == partner) %>%
+  select(Condition, starter, mean_auc) %>%
+  rename(monoculture_auc = mean_auc)
+
+
+#Species mapping- R keeps getting confused which species are which nodes so this clears it
+
+species_lookup <- tibble(
+  name = paste0("S", 1:12),
+  genus = c("Vibrio", "Phycrobacter", "Rhodococcus", "Pseudoalteromonas", "Pseudoalteromonas",
+            "Lysobacter", "Lysobacter", "Marinomonas", "Chryseobacterium", "Variovorax",
+            "Psychromonas", "Rhodococcus"),
+  species = c("hispanicus", "pulmonis", "cerasti", "fulgina", "spiralis",
+              "leutus", "leutus", "primoryensis", "indoltheticum", "paradoxus",
+              "arctica", "yunnanensis"),
+  label = paste0("italic('", substr(genus, 1, 1), "')~italic('", species, "')~' ", name, "'")
+)
+
+
+#  plot network per condition
+
+plot_interaction_network <- function(condition_to_plot) {
+  interaction_scores <- auc_summary %>%
+    filter(starter != partner) %>%
+    left_join(mono_auc, by = c("Condition", "starter")) %>%
+    rename(starter_auc = monoculture_auc) %>%
+    left_join(mono_auc, by = c("Condition", "partner" = "starter")) %>%
+    rename(partner_auc = monoculture_auc) %>%
+    mutate(
+      expected_auc = (starter_auc + partner_auc) / 2,
+      interaction_score = (mean_auc / expected_auc) - 1,
+      interaction_type = case_when(
+        interaction_score < -0.1 ~ "Negative",
+        interaction_score >  0.1 ~ "Positive",
+        TRUE ~ "Neutral"
+      )
+    )
+  
+  net_data <- interaction_scores %>%
+    filter(Condition == condition_to_plot)
+  
+  edges <- net_data %>%
+    select(from = partner, to = starter, interaction_score, interaction_type)
+  
+  nodes <- tibble(name = unique(c(edges$from, edges$to))) %>%
+    left_join(species_lookup, by = "name") %>%
+    mutate(label = ifelse(is.na(label), name, label)) %>%
+    distinct(name, .keep_all = TRUE)
+  
+  g <- graph_from_data_frame(d = edges, vertices = nodes, directed = TRUE)
+  layout <- create_layout(g, layout = "circle")
+  
+  ggraph(layout) +
+    geom_edge_parallel(
+      aes(color = interaction_type, edge_alpha = abs(interaction_score)),
+      arrow = arrow(length = unit(3, "mm"), type = "closed"),
+      end_cap = circle(2, 'mm'),
+      width = 0.5 #arrow width, easily adjustable :) - i dont understand how to pull the nodes closer together
+    ) +
+    geom_node_point(size = 3, color = "black") +
+    geom_text(
+      aes(x = x * 1.2, y = y * 1.2, label = label),
+      size = 4,
+      parse = TRUE
+    ) +
+    scale_edge_color_manual(
+      values = c("Positive" = "blue", "Negative" = "red", "Neutral" = "grey"),
+      name = "Interaction Type"
+    ) +
+    scale_edge_alpha(range = c(0.4, 1), guide = "none") +
+    labs(title = paste("Interaction Network –", condition_to_plot)) +
+    theme_void() +
+    theme(legend.position = "top", legend.justification = "right")
+}
+
+
+#Plot all conditions and save them into a file 
+
+all_conditions <- unique(auc_summary$Condition)
+
+interaction_plot_list <- setNames(vector("list", length(all_conditions)), all_conditions)
+
+for (cond in all_conditions) {
+  interaction_plot_list[[cond]] <- plot_interaction_network(cond)
+}
+
+save(interaction_plot_list)
+
+#  Combine all plots- dosent work even with two columns they are so squished
+
+cowplot::plot_grid(plotlist = interaction_plot_list, ncol = 2)
